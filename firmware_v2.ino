@@ -2,12 +2,13 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <Update.h>
 
 // Versao deste firmware
 const char* VERSAO_ATUAL = "2.0";
 
 // Manifesto de versao -> TROCAR pela URL raw do version.json no repositorio do grupo
-const char* URL_MANIFESTO = "https://raw.githubusercontent.com/USUARIO/REPOSITORIO/main/version.json";
+const char* URL_MANIFESTO = "https://raw.githubusercontent.com/Guimart1/repositorio-firmware/main/version.json";
 
 // Configuracao de rede (simulador Wokwi)
 const char* WIFI_SSID = "Wokwi-GUEST";
@@ -44,6 +45,8 @@ bool sessaoEmAndamento = false;
 // PROTOTIPOS DAS FUNCOES
 void conectarWiFi();
 void verificarAtualizacao();
+bool baixarManifesto(String& json);
+void executarOTA(const String& urlFirmware);
 String extrairCampoJson(const String& json, const String& campo);
 void iniciarNovaSessao();
 void realizarLeitura();
@@ -132,37 +135,35 @@ void conectarWiFi() {
   }
 }
 
-// Consulta o version.json e compara com a versao instalada
+// Orquestra o fluxo OTA: consultar -> comparar -> baixar -> gravar -> reiniciar
+// Mesmo modulo do Firmware 1.0, mudando apenas VERSAO_ATUAL
 void verificarAtualizacao() {
-  Serial.println("Verificando atualizacoes...");
+  Serial.println("========================================");
+  Serial.println("VERIFICACAO DE ATUALIZACAO REMOTA (OTA)");
+  Serial.println("========================================");
 
+  // SITUACAO 1: nao ha conexao Wi-Fi
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("ERRO: sem Wi-Fi, nao foi possivel verificar atualizacoes.");
+    Serial.println("ERRO: sem conexao Wi-Fi. Nao foi possivel consultar o manifesto.");
+    Serial.println("O Firmware 2.0 continua operando normalmente.");
+    Serial.println();
     return;
   }
 
-  WiFiClientSecure cliente;
-  cliente.setInsecure();  // nao valida o certificado HTTPS (suficiente pro laboratorio)
-
-  HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.begin(cliente, URL_MANIFESTO);
-  int codigo = http.GET();
-
-  if (codigo != HTTP_CODE_OK) {
-    Serial.print("ERRO: nao foi possivel acessar o manifesto (codigo HTTP ");
-    Serial.print(codigo);
-    Serial.println(").");
-    http.end();
+  // SITUACAO 2: o manifesto nao pode ser acessado
+  String json;
+  if (!baixarManifesto(json)) {
+    Serial.println("O Firmware 2.0 continua operando normalmente.");
+    Serial.println();
     return;
   }
-
-  String json = http.getString();
-  http.end();
 
   String versaoDisponivel = extrairCampoJson(json, "version");
-  if (versaoDisponivel == "") {
-    Serial.println("ERRO: manifesto sem o campo \"version\".");
+  String urlFirmware      = extrairCampoJson(json, "url");
+
+  if (versaoDisponivel == "" || urlFirmware == "") {
+    Serial.println("ERRO: manifesto invalido. Campos 'version' ou 'url' ausentes.");
+    Serial.println();
     return;
   }
 
@@ -171,12 +172,113 @@ void verificarAtualizacao() {
   Serial.print(" | Versao disponivel: ");
   Serial.println(versaoDisponivel);
 
-  if (versaoDisponivel.toFloat() > String(VERSAO_ATUAL).toFloat()) {
-    Serial.println("Existe uma versao mais nova disponivel no repositorio.");
-  } else {
+  // SITUACAO 3: a versao instalada ja e a mais recente
+  if (versaoDisponivel.toFloat() <= String(VERSAO_ATUAL).toFloat()) {
     Serial.println("A versao instalada ja e a mais recente. Nenhuma atualizacao necessaria.");
+    Serial.println();
+    return;
   }
+
+  Serial.print("Nova versao disponivel. Baixando de: ");
+  Serial.println(urlFirmware);
+
+  executarOTA(urlFirmware);
+}
+
+// Consulta o version.json por HTTPS e devolve o conteudo em 'json'
+bool baixarManifesto(String& json) {
+  WiFiClientSecure cliente;
+  cliente.setInsecure(); // nao valida o certificado, suficiente para o laboratorio
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  if (!http.begin(cliente, URL_MANIFESTO)) {
+    Serial.println("ERRO: URL do manifesto invalida.");
+    return false;
+  }
+
+  int codigo = http.GET();
+
+  if (codigo != HTTP_CODE_OK) {
+    Serial.print("ERRO: manifesto inacessivel (codigo HTTP ");
+    Serial.print(codigo);
+    Serial.println(").");
+    http.end();
+    return false;
+  }
+
+  json = http.getString();
+  http.end();
+  return true;
+}
+
+// Baixa o .bin, grava na particao OTA e reinicia o ESP32
+void executarOTA(const String& urlFirmware) {
+  WiFiClientSecure cliente;
+  cliente.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.begin(cliente, urlFirmware);
+
+  int codigo = http.GET();
+
+  // SITUACAO 4: o arquivo de firmware nao pode ser baixado
+  if (codigo != HTTP_CODE_OK) {
+    Serial.print("ERRO: falha no download do firmware (codigo HTTP ");
+    Serial.print(codigo);
+    Serial.println("). Atualizacao cancelada.");
+    http.end();
+    return;
+  }
+
+  int tamanho = http.getSize();
+  if (tamanho <= 0) {
+    Serial.println("ERRO: tamanho do arquivo de firmware desconhecido. Atualizacao cancelada.");
+    http.end();
+    return;
+  }
+
+  Serial.print("Download iniciado. Tamanho: ");
+  Serial.print(tamanho);
+  Serial.println(" bytes");
+
+  // SITUACAO 5: o processo de atualizacao retornou erro
+  if (!Update.begin(tamanho)) {
+    Serial.print("ERRO ao iniciar a gravacao OTA: ");
+    Serial.println(Update.errorString());
+    http.end();
+    return;
+  }
+
+  Serial.println("Gravando novo firmware na particao OTA...");
+  size_t gravado = Update.writeStream(*http.getStreamPtr());
+
+  if (gravado != (size_t)tamanho) {
+    Serial.print("ERRO na gravacao: ");
+    Serial.print(gravado);
+    Serial.print(" de ");
+    Serial.print(tamanho);
+    Serial.println(" bytes gravados. Atualizacao abortada.");
+    Update.abort();
+    http.end();
+    return;
+  }
+
+  if (!Update.end(true)) {
+    Serial.print("ERRO ao finalizar a gravacao OTA: ");
+    Serial.println(Update.errorString());
+    http.end();
+    return;
+  }
+
+  http.end();
+
+  Serial.println("Atualizacao concluida com sucesso. Reiniciando o ESP32...");
   Serial.println();
+  delay(1000);
+  ESP.restart();
 }
 
 // Le o valor de um campo de texto do JSON (ex: "version": "2.0" -> 2.0)
