@@ -3,11 +3,12 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 
 // Versao deste firmware
 const char* VERSAO_ATUAL = "2.0";
 
-// Manifesto de versao -> TROCAR pela URL raw do version.json no repositorio do grupo
+// Manifesto de versao 
 const char* URL_MANIFESTO = "https://raw.githubusercontent.com/Guimart1/repositorio-firmware/main/version.json";
 
 // Configuracao de rede (simulador Wokwi)
@@ -47,6 +48,7 @@ void conectarWiFi();
 void verificarAtualizacao();
 bool baixarManifesto(String& json);
 void executarOTA(const String& urlFirmware);
+void exibirParticaoAtual();
 String extrairCampoJson(const String& json, const String& campo);
 void iniciarNovaSessao();
 void realizarLeitura();
@@ -78,6 +80,7 @@ void setup() {
   Serial.println("========================================");
   Serial.println("MONITORAMENTO DE VEGETACAO - FW 2.0");
   Serial.println("========================================");
+  exibirParticaoAtual();
 
   verificarAtualizacao();  // no FW 2.0 deve mostrar que ja e a versao mais recente
 
@@ -243,6 +246,17 @@ void executarOTA(const String& urlFirmware) {
   Serial.print("Download iniciado. Tamanho: ");
   Serial.print(tamanho);
   Serial.println(" bytes");
+
+  Update.onProgress([](size_t escrito, size_t total) {
+    static int ultimoPercentual = -1;
+    int percentual = (total > 0) ? (escrito * 100) / total : 0;
+    if (percentual / 10 != ultimoPercentual / 10) {
+      ultimoPercentual = percentual;
+      Serial.print("Progresso: ");
+      Serial.print(percentual);
+      Serial.println("%");
+    }
+  });
 
   // SITUACAO 5: o processo de atualizacao retornou erro
   if (!Update.begin(tamanho)) {
@@ -423,4 +437,14 @@ void finalizarSessao() {
 
   sessaoEmAndamento = false;
   // inicioSessaoMs continua marcando o INICIO desta sessao -> proxima comeca 48s depois dele
+}
+
+
+// Mostra de qual particao o firmware esta rodando.
+// app1 comprova que esta versao chegou pelo processo OTA.
+void exibirParticaoAtual() {
+  const esp_partition_t* particao = esp_ota_get_running_partition();
+  Serial.print("Executando a partir da particao: ");
+  Serial.println(particao->label);
+  Serial.println();
 }
