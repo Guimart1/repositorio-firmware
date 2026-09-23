@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 
 // ============================================================
 // VERSAO E REPOSITORIO OTA
@@ -55,6 +56,7 @@ void verificarAtualizacao();
 bool baixarManifesto(String& json);
 String extrairCampoJson(const String& json, const String& campo);
 void executarOTA(const String& urlFirmware);
+void exibirParticaoAtual();
 
 
 // ============================================================
@@ -78,6 +80,7 @@ void setup() {
   Serial.println("========================================");
   Serial.println("MONITORAMENTO DE VEGETACAO - FW 1.0");
   Serial.println("========================================");
+  exibirParticaoAtual();
 
   iniciarNovaSessao();
 }
@@ -335,6 +338,18 @@ void executarOTA(const String& urlFirmware) {
   Serial.print(tamanho);
   Serial.println(" bytes");
 
+  // Exibe o progresso da gravacao a cada 10%
+  Update.onProgress([](size_t escrito, size_t total) {
+    static int ultimoPercentual = -1;
+    int percentual = (total > 0) ? (escrito * 100) / total : 0;
+    if (percentual / 10 != ultimoPercentual / 10) {
+      ultimoPercentual = percentual;
+      Serial.print("Progresso: ");
+      Serial.print(percentual);
+      Serial.println("%");
+    }
+  });
+
   // SITUACAO 5: o processo de atualizacao retornou erro
   if (!Update.begin(tamanho)) {
     Serial.print("ERRO ao iniciar a gravacao OTA: ");
@@ -371,4 +386,14 @@ void executarOTA(const String& urlFirmware) {
   Serial.println();
   delay(1000);
   ESP.restart();
+}
+
+
+// Mostra de qual particao o firmware esta rodando.
+// app0 indica gravacao original, app1 indica firmware recebido por OTA.
+void exibirParticaoAtual() {
+  const esp_partition_t* particao = esp_ota_get_running_partition();
+  Serial.print("Executando a partir da particao: ");
+  Serial.println(particao->label);
+  Serial.println();
 }
